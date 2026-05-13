@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/
+*.faiss
+
+# Build artifacts
+lambda_package/
+*.zip
+build_lambda.ps1
+build_layer.ps1
+
+# Scratch
+PR_DESCRIPTION.md
