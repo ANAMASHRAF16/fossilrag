@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-skeleton:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install minimal dependencies for sample validation
+        run: |
+          python -m pip install --upgrade pip
+          # Only install what test_samples.py needs - keeps CI fast.
+          # Heavier deps (sentence-transformers, faiss) are exercised in later PRs.
+
+      - name: Generate sample documents
+        run: python tests/generate_samples.py
+
+      - name: Validate generated samples
+        run: python tests/test_samples.py
+
+      - name: Confirm env.example documents all required vars
+        run: |
+          for var in GEMINI_API_KEY MANIFEST_BACKEND AWS_REGION RAW_DIR; do
+            grep -q "^${var}=" .env.example || (echo "MISSING in .env.example: ${var}" && exit 1)
+          done
+          echo "All required env vars documented."

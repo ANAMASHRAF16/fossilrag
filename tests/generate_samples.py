@@ -117,7 +117,8 @@ Total estimate: $26.70 per month
 Error Handling
 All Lambda functions implement exponential backoff on transient AWS errors.
 DLQ captures documents that fail after 3 attempts.
-ERROR-5xx responses from Gemini trigger fallback to structured marker extraction.
+ERROR-503 responses from Gemini trigger fallback to structured marker extraction.
+ERROR-429 rate limits invoke a 30-second backoff and retry.
 """
 }
 
