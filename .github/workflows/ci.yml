@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  validate-skeleton:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,17 +18,21 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install minimal dependencies for sample validation
+      - name: Install dependencies needed for tests
         run: |
           python -m pip install --upgrade pip
-          # Only install what test_samples.py needs - keeps CI fast.
-          # Heavier deps (sentence-transformers, faiss) are exercised in later PRs.
+          # Only install what tests need so CI stays fast.
+          # Heavier deps (sentence-transformers, faiss) join in later PRs.
+          pip install python-dotenv PyPDF2 python-pptx faker
 
-      - name: Generate sample documents
+      - name: Generate sample documents (PR 1 fixture)
         run: python tests/generate_samples.py
 
-      - name: Validate generated samples
+      - name: Validate sample generator (PR 1)
         run: python tests/test_samples.py
+
+      - name: Validate document extractor + marker module (PR 2)
+        run: python tests/test_extractor.py
 
       - name: Confirm env.example documents all required vars
         run: |
