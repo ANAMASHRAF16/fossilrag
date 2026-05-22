@@ -21,7 +21,13 @@ jobs:
       - name: Install light dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install python-dotenv PyPDF2 python-pptx faker
+          pip install python-dotenv PyPDF2 python-pptx faker pyyaml boto3
+
+      - name: Validate CloudFormation + Mutation 2 wiring (PR 5)
+        run: python tests/test_cloudformation.py
+
+      - name: Validate Lambda handler contracts (PR 5, Mutation 2)
+        run: python tests/test_lambda_handlers.py
 
       - name: Generate sample documents (PR 1 fixture)
         run: python tests/generate_samples.py

@@ -1,0 +1,69 @@
+version: "3.9"
+
+# Local end-to-end stack.
+# Simulates the full pipeline without AWS using LocalStack for S3/SQS/DynamoDB.
+#
+# Start everything:
+#   docker-compose up
+#
+# Then drop a file into the raw bucket:
+#   aws --endpoint-url=http://localhost:4566 s3 cp data/raw/q1_operations_report.txt s3://fossilrag-raw/
+#
+# Hit the API:
+#   curl http://localhost:8000/health
+
+services:
+
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs,dynamodb
+      - DEFAULT_REGION=eu-north-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./infra/localstack_init.sh:/etc/localstack/init/ready.d/init.sh"
+
+  extract:
+    build: .
+    command: ["lambda.extract_handler.handler"]
+    environment:
+      - RAW_BUCKET=fossilrag-raw
+      - SILVER_BUCKET=fossilrag-silver
+      - AWS_REGION=eu-north-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://localstack:4566
+    depends_on:
+      - localstack
+
+  chunk-embed:
+    build: .
+    command: ["lambda.chunk_embed_handler.handler"]
+    environment:
+      - SILVER_BUCKET=fossilrag-silver
+      - GOLD_BUCKET=fossilrag-gold
+      - MANIFEST_TABLE=fossilrag-manifest
+      - AWS_REGION=eu-north-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://localstack:4566
+
+  api:
+    build: .
+    command: ["lambda.api_handler.handler"]
+    ports:
+      - "8000:8080"
+    environment:
+      - GOLD_BUCKET=fossilrag-gold
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MANIFEST_BACKEND=dynamodb
+      - MANIFEST_TABLE=fossilrag-manifest
+      - AWS_REGION=eu-north-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://localstack:4566
+    depends_on:
+      - localstack

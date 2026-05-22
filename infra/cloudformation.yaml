@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FossilRAG — serverless document enrichment pipeline
+
+Parameters:
+  AccountId:
+    Type: String
+    Description: AWS account ID (used for bucket name uniqueness)
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: Gemini API key for /mutate endpoint
+  EcrImageUri:
+    Type: String
+    Description: ECR image URI for Docker-based Lambda functions
+
+Resources:
+
+  # ── S3 Buckets ──────────────────────────────────────────────────────────────
+
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "fossilrag-raw-${AccountId}"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Function: !GetAtt ExtractFunction.Arn
+      Tags:
+        - Key: project
+          Value: fossilrag
+        - Key: layer
+          Value: raw
+
+  SilverBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "fossilrag-silver-${AccountId}"
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt ChunkQueue.Arn
+      Tags:
+        - Key: project
+          Value: fossilrag
+        - Key: layer
+          Value: silver
+
+  GoldBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "fossilrag-gold-${AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: archive-old-chunks
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+      Tags:
+        - Key: project
+          Value: fossilrag
+        - Key: layer
+          Value: gold
+
+  # ── DynamoDB Tables ─────────────────────────────────────────────────────────
+
+  ManifestTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fossilrag-manifest
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: chunk_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: chunk_id
+          KeyType: HASH
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  EnrichmentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fossilrag-enrichment
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: doc_id
+          AttributeType: S
+        - AttributeName: version
+          AttributeType: N
+      KeySchema:
+        - AttributeName: doc_id
+          KeyType: HASH
+        - AttributeName: version
+          KeyType: RANGE
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  # ── SQS + DLQ (Mutation 2) ──────────────────────────────────────────────────
+
+  ChunkDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fossilrag-chunk-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  ChunkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fossilrag-chunk-queue
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ChunkDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  # ── IAM Role (shared across all Lambdas) ────────────────────────────────────
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: fossilrag-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: fossilrag-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+                Resource:
+                  - !Sub "arn:aws:s3:::fossilrag-raw-${AccountId}/*"
+                  - !Sub "arn:aws:s3:::fossilrag-silver-${AccountId}/*"
+                  - !Sub "arn:aws:s3:::fossilrag-gold-${AccountId}/*"
+                  - !Sub "arn:aws:s3:::fossilrag-gold-${AccountId}"
+              - Effect: Allow
+                Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan"]
+                Resource:
+                  - !GetAtt ManifestTable.Arn
+                  - !GetAtt EnrichmentTable.Arn
+              - Effect: Allow
+                Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+                Resource: !GetAtt ChunkQueue.Arn
+
+  # ── Lambda Functions ─────────────────────────────────────────────────────────
+
+  ExtractFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fossilrag-extract
+      PackageType: Image
+      Code:
+        ImageUri: !Ref EcrImageUri
+      ImageConfig:
+        Command: ["lambda.extract_handler.handler"]
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          RAW_BUCKET: !Sub "fossilrag-raw-${AccountId}"
+          SILVER_BUCKET: !Sub "fossilrag-silver-${AccountId}"
+          AWS_REGION_NAME: !Ref AWS::Region
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  ChunkEmbedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fossilrag-chunk-embed
+      PackageType: Image
+      Code:
+        ImageUri: !Ref EcrImageUri
+      ImageConfig:
+        Command: ["lambda.chunk_embed_handler.handler"]
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          SILVER_BUCKET: !Sub "fossilrag-silver-${AccountId}"
+          GOLD_BUCKET: !Sub "fossilrag-gold-${AccountId}"
+          MANIFEST_TABLE: fossilrag-manifest
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fossilrag-api
+      PackageType: Image
+      Code:
+        ImageUri: !Ref EcrImageUri
+      ImageConfig:
+        Command: ["lambda.api_handler.handler"]
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      MemorySize: 1024
+      Environment:
+        Variables:
+          GOLD_BUCKET: !Sub "fossilrag-gold-${AccountId}"
+          MANIFEST_TABLE: fossilrag-manifest
+          GEMINI_API_KEY: !Ref GeminiApiKey
+      Tags:
+        - Key: project
+          Value: fossilrag
+
+  ApiFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt ApiFunction.Arn
+      Cors:
+        AllowOrigins: ["*"]
+        AllowMethods: ["GET", "POST"]
+
+  # ── Event wiring ─────────────────────────────────────────────────────────────
+
+  SQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ChunkQueue.Arn
+      FunctionName: !GetAtt ChunkEmbedFunction.Arn
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+Outputs:
+  ApiUrl:
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+    Description: FossilRAG API public URL
+  ChunkQueueUrl:
+    Value: !Ref ChunkQueue
+  DLQUrl:
+    Value: !Ref ChunkDLQ
